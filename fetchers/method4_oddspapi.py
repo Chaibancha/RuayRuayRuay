@@ -1,21 +1,22 @@
 """Method 4: OddsPapi Free Tier REST API (/v4).
 
 Implements the exact 2-step workflow from the Gemini guide:
-  1. GET /v4/fixtures (sportId=10, bookmaker="1xbet", from/to UTC ISO-8601)
-  2. GET /v4/odds (batch fixtureIds when supported, parsing 5-level nested schema:
+  1. GET /v4/fixtures (bookmaker="1xbet", from/to UTC ISO-8601)
+  2. GET /v4/odds (batch fixtureIds, parsing 5-level nested schema:
      bookmakers -> "1xbet" -> markets -> "101" -> outcomes -> "101"/"102"/"103"
      -> players -> "0" -> {price, active, lastUpdated})
-Also caches /v4/markets locally in cache/oddspapi_markets.json to conserve the
-250 requests/month Free Tier quota.
+When ODDSPAPI_API_KEY is not configured, maps REAL live upcoming 1xBet matches
+for the selected date range into OddsPapi's 5-level nested JSON schema so the
+user never receives fake/past matches.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -23,16 +24,24 @@ import requests
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from fetchers.method1_internal_feed import fetch_live_vzip_bundle
     from fetchers.schema import (
+        DEMO_SOURCE_MODE,
+        UNAVAILABLE_SOURCE_MODE,
         NormalizedMatch,
+        filter_matches_for_request,
         get_sample_match_seeds,
         get_sport_info,
         now_utc_iso,
         parse_date_window,
     )
 else:
+    from .method1_internal_feed import fetch_live_vzip_bundle
     from .schema import (
+        DEMO_SOURCE_MODE,
+        UNAVAILABLE_SOURCE_MODE,
         NormalizedMatch,
+        filter_matches_for_request,
         get_sample_match_seeds,
         get_sport_info,
         now_utc_iso,
@@ -99,10 +108,11 @@ def get_upcoming_fixtures(
     timeout: int = 12,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    tz_offset_minutes: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Step 1: Fetch upcoming fixtures carrying 1xBet odds."""
     if date_from or date_to:
-        from_dt, to_dt = parse_date_window(date_from, date_to)
+        from_dt, to_dt = parse_date_window(date_from, date_to, tz_offset_minutes)
     else:
         from_dt = datetime.now(timezone.utc)
         to_dt = from_dt + timedelta(hours=hours_ahead)
@@ -171,7 +181,6 @@ def parse_oddspapi_payload(
     p_away, act_a = _extract_outcome(outcomes_1x2, "103")
     any_active = act_h or act_d or act_a
 
-    # Optional Over/Under (market 104) & Handicap (market 105)
     market_ou = markets.get(MARKET_OU, {})
     ou_outcomes = market_ou.get("outcomes", {})
     p_over, _ = _extract_outcome(ou_outcomes, "104")
@@ -215,66 +224,51 @@ def parse_oddspapi_payload(
     ).finalize_metrics()
 
 
-def _build_simulated_oddspapi_payloads(
-    mode: str = "prematch",
-    count: int = 10,
-    sport_id: int = 1,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+def _matches_to_oddspapi_payloads(
+    matches: List[NormalizedMatch], oddspapi_sid: int
 ) -> List[Dict[str, Any]]:
-    """Create realistic 5-level nested OddsPapi /v4/odds payloads."""
+    """Convert real NormalizedMatch records into OddsPapi 5-level nested JSON schema."""
     ts = now_utc_iso()
     payloads: List[Dict[str, Any]] = []
-    seeds = get_sample_match_seeds(
-        mode=mode,
-        sport_id=sport_id,
-        count=count,
-        date_from=date_from,
-        date_to=date_to,
-    )
-    for s in seeds:
-        oddspapi_sid = get_sport_info(s["sport_id"])["oddspapi_id"]
-        outcomes_1x2: Dict[str, Any] = {
-            "101": {"players": {"0": {"price": s["home_odds"], "active": s["active"], "lastUpdated": ts}}},
-            "103": {"players": {"0": {"price": s["away_odds"], "active": s["active"], "lastUpdated": ts}}},
-        }
-        if s["draw_odds"] is not None:
-            outcomes_1x2["102"] = {"players": {"0": {"price": s["draw_odds"], "active": s["active"], "lastUpdated": ts}}}
+    for m in matches:
+        outcomes_1x2: Dict[str, Any] = {}
+        if m.odds_home is not None:
+            outcomes_1x2["101"] = {"players": {"0": {"price": m.odds_home, "active": m.market_active, "lastUpdated": ts}}}
+        if m.odds_draw is not None:
+            outcomes_1x2["102"] = {"players": {"0": {"price": m.odds_draw, "active": m.market_active, "lastUpdated": ts}}}
+        if m.odds_away is not None:
+            outcomes_1x2["103"] = {"players": {"0": {"price": m.odds_away, "active": m.market_active, "lastUpdated": ts}}}
 
         markets_obj: Dict[str, Any] = {MARKET_1X2: {"outcomes": outcomes_1x2}}
-        if s["ou_line"] is not None and s["over_odds"] is not None:
+        if m.total_line is not None and m.odds_over is not None:
             markets_obj[MARKET_OU] = {
-                "handicap": s["ou_line"],
+                "handicap": m.total_line,
                 "outcomes": {
-                    "104": {"players": {"0": {"price": s["over_odds"], "active": s["active"], "lastUpdated": ts}}},
-                    "105": {"players": {"0": {"price": s["under_odds"], "active": s["active"], "lastUpdated": ts}}},
+                    "104": {"players": {"0": {"price": m.odds_over, "active": m.market_active, "lastUpdated": ts}}},
+                    "105": {"players": {"0": {"price": m.odds_under, "active": m.market_active, "lastUpdated": ts}}},
                 },
             }
-        if s["hdp_line"] is not None and s["hdp_home"] is not None:
+        if m.handicap_line is not None and m.handicap_home is not None:
             markets_obj[MARKET_HDP] = {
-                "handicap": s["hdp_line"],
+                "handicap": m.handicap_line,
                 "outcomes": {
-                    "101": {"players": {"0": {"price": s["hdp_home"], "active": s["active"], "lastUpdated": ts}}},
-                    "103": {"players": {"0": {"price": s["hdp_away"], "active": s["active"], "lastUpdated": ts}}},
+                    "101": {"players": {"0": {"price": m.handicap_home, "active": m.market_active, "lastUpdated": ts}}},
+                    "103": {"players": {"0": {"price": m.handicap_away, "active": m.market_active, "lastUpdated": ts}}},
                 },
             }
 
         payloads.append(
             {
-                "fixtureId": s["oddspapi_id"],
-                "sportId": oddspapi_sid,
-                "sportLabel": s["sport_label"],
-                "tournamentName": s["league"],
-                "participant1Name": s["home"],
-                "participant2Name": s["away"],
-                "startTime": s["start_iso"],
-                "status": s["status"],
-                "score": s["score"],
-                "bookmakers": {
-                    BOOKMAKER_SLUG: {
-                        "markets": markets_obj
-                    }
-                },
+                "fixtureId": f"id{m.match_id}",
+                "sportId": oddspapi_sid or 10,
+                "sportLabel": m.sport,
+                "tournamentName": m.league,
+                "participant1Name": m.home_team,
+                "participant2Name": m.away_team,
+                "startTime": m.start_time_utc,
+                "status": m.match_status,
+                "score": m.score,
+                "bookmakers": {BOOKMAKER_SLUG: {"markets": markets_obj}},
             }
         )
     return payloads
@@ -287,18 +281,26 @@ def fetch_oddspapi_odds(
     api_key: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    tz_offset_minutes: Optional[int] = None,
+    demo_mode: bool = False,
 ) -> Dict[str, Any]:
-    """Fetch 1xBet odds via OddsPapi /v4 REST API with local market cache & fallback."""
+    """Fetch 1xBet odds via OddsPapi /v4 REST API (or map live 1xBet feed into v4 schema)."""
     started = time.perf_counter()
+    start_dt, end_dt = parse_date_window(date_from, date_to, tz_offset_minutes)
     resolved_key = (api_key or os.getenv("ODDSPAPI_API_KEY") or "").strip()
     load_or_cache_markets(resolved_key or None)
     sport_info = get_sport_info(sport_id)
     oddspapi_sid = sport_info["oddspapi_id"]
+    fetched_at = now_utc_iso()
 
     raw_payloads: List[Dict[str, Any]] = []
+    matches: List[NormalizedMatch] = []
+    filter_stats: Dict[str, int] = {}
     error_detail: Optional[str] = None
     source_mode = "live (OddsPapi v4)"
     requests_used = 0
+    is_live = False
+    is_demo = False
 
     if resolved_key and resolved_key != "YOUR_API_KEY_HERE":
         try:
@@ -308,6 +310,7 @@ def fetch_oddspapi_odds(
                 sport_id=oddspapi_sid,
                 date_from=date_from,
                 date_to=date_to,
+                tz_offset_minutes=tz_offset_minutes,
             )
             requests_used += 1
             target_ids = [
@@ -325,34 +328,84 @@ def fetch_oddspapi_odds(
                         f"{sport_info['icon']} {sport_info['name_th']} ({sport_info['name_en']})",
                     )
                 requests_used += 1
-            else:
-                error_detail = "No upcoming 1xBet fixtures returned in the selected date range."
+                parsed = [
+                    parse_oddspapi_payload(p, fetched_at=fetched_at, source_mode=source_mode)
+                    for p in raw_payloads
+                ]
+                matches, filter_stats = filter_matches_for_request(
+                    parsed, mode, start_dt, end_dt, count
+                )
+                is_live = True
         except Exception as exc:
             error_detail = f"{type(exc).__name__}: {exc}"
-    else:
-        error_detail = (
-            "ODDSPAPI_API_KEY is not configured; using realistic 5-level nested "
-            "OddsPapi v4 sample payload (enter your free API key to query live)."
-        )
 
-    is_live = len(raw_payloads) > 0
     if not is_live:
-        source_mode = "simulated_fallback (No API Key / Quota)"
-        raw_payloads = _build_simulated_oddspapi_payloads(
+        # Map real upcoming 1xBet matches into OddsPapi 5-level schema so matches are real & in range
+        source_mode = "live_1xbet_in_oddspapi_v4_schema (No API Key)"
+        endpoint_used, vzip_matches, _, filter_stats = fetch_live_vzip_bundle(
             mode=mode,
-            count=count,
             sport_id=sport_id,
-            date_from=date_from,
-            date_to=date_to,
+            count=count,
+            domain="https://1xbet.com",
+            proxy=None,
+            timeout=8,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            method_id=METHOD_ID,
+            method_name=METHOD_NAME,
+            source_mode=source_mode,
         )
+        if endpoint_used is not None and vzip_matches:
+            raw_payloads = _matches_to_oddspapi_payloads(vzip_matches, oddspapi_sid)
+            matches = [
+                parse_oddspapi_payload(p, fetched_at=fetched_at, source_mode=source_mode)
+                for p in raw_payloads
+            ]
+            is_live = True
+        elif demo_mode:
+            is_demo = True
+            source_mode = DEMO_SOURCE_MODE
+            seeds = get_sample_match_seeds(
+                mode=mode,
+                sport_id=sport_id,
+                count=count,
+                date_from=date_from,
+                date_to=date_to,
+                tz_offset_minutes=tz_offset_minutes,
+            )
+            demo_matches = [
+                NormalizedMatch(
+                    method_id=METHOD_ID,
+                    method_name=METHOD_NAME,
+                    source_mode=source_mode,
+                    match_id=s["oddspapi_id"],
+                    sport=s["sport_label"],
+                    league=s["league"],
+                    home_team=s["home"],
+                    away_team=s["away"],
+                    start_time_utc=s["start_iso"],
+                    match_status=s["status"],
+                    score=s["score"],
+                    odds_home=s["home_odds"],
+                    odds_draw=s["draw_odds"],
+                    odds_away=s["away_odds"],
+                    handicap_line=s["hdp_line"],
+                    handicap_home=s["hdp_home"],
+                    handicap_away=s["hdp_away"],
+                    total_line=s["ou_line"],
+                    odds_over=s["over_odds"],
+                    odds_under=s["under_odds"],
+                    market_active=s["active"],
+                    fetched_at_utc=fetched_at,
+                ).finalize_metrics()
+                for s in seeds
+            ]
+            raw_payloads = _matches_to_oddspapi_payloads(demo_matches, oddspapi_sid)
+            matches = demo_matches
+        else:
+            source_mode = UNAVAILABLE_SOURCE_MODE
 
-    fetched_at = now_utc_iso()
-    matches = [
-        parse_oddspapi_payload(p, fetched_at=fetched_at, source_mode=source_mode)
-        for p in raw_payloads
-    ]
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-
     endpoint_hint = (
         f"{BASE_URL}/odds?bookmaker={BOOKMAKER_SLUG}"
         + (f"&sportId={oddspapi_sid}" if oddspapi_sid > 0 else "")
@@ -362,13 +415,19 @@ def fetch_oddspapi_odds(
         "method_name": METHOD_NAME,
         "endpoint": endpoint_hint,
         "mode": mode,
-        "date_range": {"from": date_from, "to": date_to},
+        "date_range": {
+            "from": date_from,
+            "to": date_to,
+            "window_utc": [start_dt.isoformat(), end_dt.isoformat()],
+        },
         "source_mode": source_mode,
         "is_live_data": is_live,
+        "is_demo": is_demo,
         "requests_used_this_run": requests_used,
         "quota_monthly_limit": 250,
         "latency_ms": elapsed_ms,
         "match_count": len(matches),
+        "filter_stats": filter_stats,
         "error": error_detail,
         "fetched_at_utc": fetched_at,
         "matches": [m.to_dict() for m in matches],
@@ -377,18 +436,13 @@ def fetch_oddspapi_odds(
 
 
 if __name__ == "__main__":
-    result = fetch_oddspapi_odds(mode="prematch", count=5)
+    result = fetch_oddspapi_odds(mode="prematch", sport_id=0, count=5)
     print(f"[{result['method_name']}]")
     print(
         f"Status: {result['source_mode']} | Matches: {result['match_count']} | Latency: {result['latency_ms']} ms"
     )
-    if result["error"]:
-        print(f"Notice: {result['error']}")
     for m in result["matches"][:5]:
         print(
-            f" - [{m['league']}] {m['home_team']} vs {m['away_team']} | "
-            f"1X2: {m['odds_home']} / {m['odds_draw']} / {m['odds_away']} | "
-            f"Implied %: {m['implied_prob_home']}% / {m['implied_prob_draw']}% / {m['implied_prob_away']}%"
+            f" - [{m['sport']}] [{m['league']}] {m['home_team']} vs {m['away_team']} @ {m['start_time_local']} | "
+            f"1X2: {m['odds_home']} / {m['odds_draw']} / {m['odds_away']}"
         )
-    if "--json" in sys.argv:
-        print(json.dumps(result["matches"], ensure_ascii=False, indent=2))

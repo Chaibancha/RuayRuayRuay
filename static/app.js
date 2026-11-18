@@ -99,7 +99,7 @@ function readFormConfig() {
   return {
     mode: document.getElementById("cfgMode").value === "live" ? "live" : "prematch",
     sport_id: parseSportIdSafe(document.getElementById("cfgSport").value),
-    count: Math.max(1, Math.min(Number.isNaN(rawCount) ? 6 : rawCount, 50)),
+    count: Math.max(1, Math.min(Number.isNaN(rawCount) ? 50 : rawCount, 1000)),
     date_from: dateFrom,
     date_to: dateTo,
     domain: document.getElementById("cfgDomain").value.trim() || "https://1xbet.com",
@@ -292,6 +292,16 @@ async function triggerFetch(methodTarget = "all") {
     const methodsResp = await fetch("/api/methods");
     const methodsJson = await methodsResp.json();
     STATE.methodsMeta = methodsJson.methods || STATE.methodsMeta;
+
+    // Auto-sync Step 3 Download Center selector & Step 4 Table filter to the method just fetched
+    const dlSelect = document.getElementById("dlMethodSelect");
+    if (dlSelect) {
+      dlSelect.value = methodTarget;
+    }
+    const filterMethodEl = document.getElementById("filterMethod");
+    if (filterMethodEl) {
+      filterMethodEl.value = methodTarget;
+    }
 
     const elapsedSec = ((performance.now() - STATE.fetchStartedAt) / 1000).toFixed(2);
     setFetchingState(null);
@@ -501,9 +511,9 @@ function renderOddsTable() {
         ? `<span class="badge badge-live">Active</span>`
         : `<span class="badge badge-suspended">Suspended</span>`;
 
-      const timeDisplay = (m.start_time_utc || "")
-        .replace("T", " ")
-        .replace("Z", "");
+      const timeDisplay =
+        m.start_time_local ||
+        (m.start_time_utc || "").replace("T", " ").replace("Z", " UTC");
 
       return `
         <tr>

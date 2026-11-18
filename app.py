@@ -69,6 +69,7 @@ CSV_COLUMNS = [
     ("league", "ลีก / รายการ"),
     ("home_team", "ทีมเจ้าบ้าน"),
     ("away_team", "ทีมเยือน"),
+    ("start_time_local", "เวลาแข่ง (เวลาไทย UTC+7)"),
     ("start_time_utc", "เวลาแข่ง (UTC)"),
     ("match_status", "สถานะแมตช์"),
     ("score", "สกอร์"),
@@ -135,7 +136,7 @@ class StateStore:
             cleaned = {
                 "mode": "live" if cfg.get("mode") == "live" else "prematch",
                 "sport_id": _parse_sport_id(cfg.get("sport_id", 1)),
-                "count": max(1, min(parsed_count, 50)),
+                "count": max(1, min(parsed_count, 1000)),
                 "date_from": str(cfg.get("date_from") or def_from).strip()[:10],
                 "date_to": str(cfg.get("date_to") or def_to).strip()[:10],
                 "domain": str(cfg.get("domain") or "https://1xbet.com").strip(),
@@ -167,10 +168,10 @@ def run_single_method(method_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """Execute one of the 4 fetching methods using validated parameters."""
     mode = "live" if params.get("mode") == "live" else "prematch"
     try:
-        raw_c = params.get("count", 10)
-        count = max(1, min(int(raw_c) if raw_c not in (None, "") else 10, 50))
+        raw_c = params.get("count", 50)
+        count = max(1, min(int(raw_c) if raw_c not in (None, "") else 50, 1000))
     except (TypeError, ValueError):
-        count = 10
+        count = 50
     sport_id = _parse_sport_id(params.get("sport_id", 1))
     def_from, def_to = _default_date_range()
     date_from = str(params.get("date_from") or def_from).strip()[:10]
@@ -181,8 +182,15 @@ def run_single_method(method_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
     oddspapi_key = str(params.get("oddspapi_key") or "").strip() or None
     live_browser = bool(params.get("live_browser", False))
 
+    sig = {
+        "mode": mode,
+        "sport_id": sport_id,
+        "count": count,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
     if method_id == "1":
-        return fetch_internal_feed(
+        res = fetch_internal_feed(
             mode=mode,
             sport_id=sport_id,
             count=count,
@@ -191,8 +199,8 @@ def run_single_method(method_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
             date_from=date_from,
             date_to=date_to,
         )
-    if method_id == "2":
-        return fetch_browser_intercept(
+    elif method_id == "2":
+        res = fetch_browser_intercept(
             mode=mode,
             sport_id=sport_id,
             count=count,
@@ -201,16 +209,16 @@ def run_single_method(method_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
             date_from=date_from,
             date_to=date_to,
         )
-    if method_id == "3":
-        return fetch_aggregator_odds(
+    elif method_id == "3":
+        res = fetch_aggregator_odds(
             mode=mode,
             sport_id=sport_id,
             count=count,
             date_from=date_from,
             date_to=date_to,
         )
-    if method_id == "4":
-        return fetch_oddspapi_odds(
+    elif method_id == "4":
+        res = fetch_oddspapi_odds(
             mode=mode,
             sport_id=sport_id,
             count=count,
@@ -218,7 +226,10 @@ def run_single_method(method_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
             date_from=date_from,
             date_to=date_to,
         )
-    raise ValueError(f"Unknown method_id: {method_id}")
+    else:
+        raise ValueError(f"Unknown method_id: {method_id}")
+    res["params_signature"] = sig
+    return res
 
 
 def execute_fetch(target_method: str, params: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -243,18 +254,48 @@ def execute_fetch(target_method: str, params: Dict[str, Any]) -> Dict[str, Dict[
     return ordered
 
 
+def _expected_sig(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    def_from, def_to = _default_date_range()
+    raw_c = cfg.get("count", 50)
+    try:
+        cnt = max(1, min(int(raw_c) if raw_c not in (None, "") else 50, 1000))
+    except (TypeError, ValueError):
+        cnt = 50
+    return {
+        "mode": "live" if cfg.get("mode") == "live" else "prematch",
+        "sport_id": _parse_sport_id(cfg.get("sport_id", 1)),
+        "count": cnt,
+        "date_from": str(cfg.get("date_from") or def_from).strip()[:10],
+        "date_to": str(cfg.get("date_to") or def_to).strip()[:10],
+    }
+
+
 def _collect_for_export(
     method_filter: str, snapshot: Dict[str, Dict[str, Any]]
 ) -> tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
-    """Filter stored results and ensure data exists before export."""
+    """Filter stored results and ensure data matches current saved settings before export."""
+    saved_cfg = STORE.get_settings()
+    exp_sig = _expected_sig(saved_cfg)
+
     if not snapshot:
-        snapshot = execute_fetch("all", {})
+        execute_fetch("all", saved_cfg)
+        snapshot = STORE.snapshot()
 
     if method_filter in ("1", "2", "3", "4"):
-        if method_filter not in snapshot:
-            snapshot = execute_fetch(method_filter, {})
+        cur = snapshot.get(method_filter)
+        if not cur or cur.get("params_signature") != exp_sig:
+            execute_fetch(method_filter, saved_cfg)
+            snapshot = STORE.snapshot()
         selected = {method_filter: snapshot[method_filter]}
     else:
+        stale = [
+            k
+            for k in ("1", "2", "3", "4")
+            if k not in snapshot or snapshot[k].get("params_signature") != exp_sig
+        ]
+        if stale:
+            execute_fetch("all", saved_cfg)
+            snapshot = STORE.snapshot()
         selected = {k: snapshot[k] for k in ("1", "2", "3", "4") if k in snapshot}
 
     matches: List[Dict[str, Any]] = []
@@ -599,6 +640,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send_json({"error": f"Unsupported download format: {fmt}"}, status=400)
 
 
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    """Prevent multiple processes from binding the same port on Windows."""
+
+    allow_reuse_address = False
+
+
 def main() -> None:
     port = int(os.getenv("PORT", "8000"))
     for idx, arg in enumerate(sys.argv[1:]):
@@ -607,9 +654,9 @@ def main() -> None:
 
     # Pre-warm initial dataset if empty so Dashboard has immediate data on load
     if not STORE.snapshot():
-        execute_fetch("all", {"mode": "prematch", "count": 6})
+        execute_fetch("all", STORE.get_settings())
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), DashboardHandler)
+    server = ExclusiveThreadingHTTPServer(("127.0.0.1", port), DashboardHandler)
     print(f"1xBet 4-Method Dashboard running at http://localhost:{port}")
     try:
         server.serve_forever()

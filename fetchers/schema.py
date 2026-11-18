@@ -38,6 +38,11 @@ SPORTS_CATALOG: List[Dict[str, Any]] = [
             ("England. Premier League", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard"),
             ("UEFA Champions League", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard"),
             ("Spain. LaLiga", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard"),
+            ("Italy. Serie A", "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard"),
+            ("Germany. Bundesliga", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard"),
+            ("France. Ligue 1", "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard"),
+            ("UEFA Nations League", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.nations/scoreboard"),
+            ("FIFA World Cup Qualifiers", "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.worldq.conmebol/scoreboard"),
         ],
         "has_draw": True,
     },
@@ -288,6 +293,7 @@ class NormalizedMatch:
     away_team: str
     start_time_utc: str
     match_status: str
+    start_time_local: str = ""
     score: str = "-"
     odds_home: Optional[float] = None
     odds_draw: Optional[float] = None
@@ -310,6 +316,8 @@ class NormalizedMatch:
         """Compute implied probabilities and bookmaker overround/margin."""
         if not self.fetched_at_utc:
             self.fetched_at_utc = now_utc_iso()
+        if not self.start_time_local and self.start_time_utc:
+            self.start_time_local = utc_iso_to_local_str(self.start_time_utc)
 
         self.implied_prob_home = calc_implied_prob(self.odds_home)
         self.implied_prob_draw = calc_implied_prob(self.odds_draw)
@@ -338,6 +346,26 @@ class NormalizedMatch:
 def now_utc_iso() -> str:
     """Return current UTC timestamp formatted as ISO-8601 Z."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utc_iso_to_local_str(
+    iso_str: str, tz_offset_minutes: Optional[int] = None
+) -> str:
+    """Format an ISO-8601 UTC timestamp into local time (default Thailand UTC+7)."""
+    dt = _iso_to_dt(iso_str)
+    if dt is None:
+        return str(iso_str or "")
+    offset_min = (
+        server_tz_offset_minutes()
+        if tz_offset_minutes is None
+        else int(tz_offset_minutes)
+    )
+    local_tz = timezone(timedelta(minutes=offset_min))
+    sign = "+" if offset_min >= 0 else "-"
+    hrs = abs(offset_min) // 60
+    mins = abs(offset_min) % 60
+    tz_label = f"UTC{sign}{hrs}" if mins == 0 else f"UTC{sign}{hrs}:{mins:02d}"
+    return f"{dt.astimezone(local_tz).strftime('%Y-%m-%d %H:%M')} ({tz_label})"
 
 
 def unix_to_iso(ts: Optional[int | float]) -> str:
@@ -523,32 +551,96 @@ _SPORT_FIXTURE_BANK: Dict[int, List[Dict[str, Any]]] = {
 }
 
 
+DEMO_SOURCE_MODE = "DEMO (ข้อมูลตัวอย่าง ไม่ใช่ข้อมูลจริง)"
+UNAVAILABLE_SOURCE_MODE = "unavailable (ดึงข้อมูลจริงไม่ได้)"
+
+
+def server_tz_offset_minutes() -> int:
+    """Return this machine's local UTC offset in minutes (e.g. +420 for UTC+7)."""
+    offset = datetime.now().astimezone().utcoffset()
+    return int(offset.total_seconds() // 60) if offset else 0
+
+
 def parse_date_window(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    tz_offset_minutes: Optional[int] = None,
 ) -> tuple[datetime, datetime]:
-    """Parse YYYY-MM-DD bounds into UTC start (00:00:00Z) and end (23:59:59Z)."""
-    today_utc = datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    """Parse local YYYY-MM-DD bounds into a UTC window.
 
-    def _parse_day(val: Optional[str], fallback: datetime) -> datetime:
+    The dates are interpreted in the user's local timezone (``tz_offset_minutes``
+    east of UTC, e.g. +420 for Thailand). "2026-11-19" to "2026-11-20" in UTC+7
+    therefore becomes 2026-11-18T17:00:00Z .. 2026-11-20T16:59:59Z.
+    """
+    offset_min = server_tz_offset_minutes() if tz_offset_minutes is None else int(tz_offset_minutes)
+    local_tz = timezone(timedelta(minutes=offset_min))
+    today_local = datetime.now(local_tz).date()
+
+    def _parse_day(val: Optional[str], fallback):
         if not val or not str(val).strip():
             return fallback
         try:
-            dt = datetime.strptime(str(val).strip()[:10], "%Y-%m-%d")
-            return dt.replace(tzinfo=timezone.utc)
+            return datetime.strptime(str(val).strip()[:10], "%Y-%m-%d").date()
         except ValueError:
             return fallback
 
-    start_day = _parse_day(date_from, today_utc)
+    start_day = _parse_day(date_from, today_local)
     end_day = _parse_day(date_to, start_day + timedelta(days=3))
     if end_day < start_day:
         start_day, end_day = end_day, start_day
 
-    start_dt = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_dt = end_day.replace(hour=23, minute=59, second=59, microsecond=0)
-    return start_dt, end_dt
+    start_local = datetime(start_day.year, start_day.month, start_day.day, 0, 0, 0, tzinfo=local_tz)
+    end_local = datetime(end_day.year, end_day.month, end_day.day, 23, 59, 59, tzinfo=local_tz)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def _iso_to_dt(val: Any) -> Optional[datetime]:
+    if not val:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(val).strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def filter_matches_for_request(
+    matches: List["NormalizedMatch"],
+    mode: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    count: int,
+) -> tuple[List["NormalizedMatch"], Dict[str, int]]:
+    """Keep only matches that are valid for the request.
+
+    - Pre-match: kickoff must be in the future AND inside [start_dt, end_dt];
+      finished / in-play events are dropped.
+    - Live: only events currently in-play.
+    Returns (kept_matches[:count], drop_stats).
+    """
+    now = datetime.now(timezone.utc)
+    stats = {"total_from_source": len(matches), "dropped_past_or_finished": 0, "dropped_outside_range": 0, "dropped_not_live": 0}
+    kept: List[NormalizedMatch] = []
+    for m in matches:
+        status = (m.match_status or "").lower()
+        if mode == "live":
+            if status != "live":
+                stats["dropped_not_live"] += 1
+                continue
+            kept.append(m)
+            continue
+        dt = _iso_to_dt(m.start_time_utc)
+        if dt is None or status in ("finished", "live") or dt <= now:
+            stats["dropped_past_or_finished"] += 1
+            continue
+        if not (start_dt <= dt <= end_dt):
+            stats["dropped_outside_range"] += 1
+            continue
+        kept.append(m)
+    kept.sort(key=lambda x: x.start_time_utc)
+    return kept[: max(1, int(count))], stats
 
 
 def get_sample_match_seeds(
@@ -557,11 +649,18 @@ def get_sample_match_seeds(
     count: int = 6,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    tz_offset_minutes: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """Return realistic match seeds for any sport_id (including 0 = All Sports) within date range."""
+    """DEMO ONLY: synthetic fixtures for UI testing (never presented as real data)."""
     is_live = mode == "live"
-    target_count = max(1, min(int(count), 50))
-    start_dt, end_dt = parse_date_window(date_from, date_to)
+    target_count = max(1, min(int(count), 1000))
+    start_dt, end_dt = parse_date_window(date_from, date_to, tz_offset_minutes)
+    # Demo fixtures must never be in the past
+    earliest = datetime.now(timezone.utc) + timedelta(minutes=30)
+    if start_dt < earliest:
+        start_dt = earliest
+    if end_dt <= start_dt:
+        end_dt = start_dt + timedelta(hours=2)
     span_seconds = max(3600, int((end_dt - start_dt).total_seconds()))
 
     sid_int = int(sport_id)
@@ -639,14 +738,16 @@ def build_simulated_vzip_payload(
     sport_id: int = 1,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    tz_offset_minutes: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Build a realistic 1xBet Get1x2_VZip raw JSON response (`Value` & `E` keys)."""
+    """DEMO ONLY: synthetic 1xBet Get1x2_VZip-shaped payload (`Value` & `E` keys)."""
     seeds = get_sample_match_seeds(
         mode=mode,
         sport_id=sport_id,
         count=count,
         date_from=date_from,
         date_to=date_to,
+        tz_offset_minutes=tz_offset_minutes,
     )
     value_items: List[Dict[str, Any]] = []
     for s in seeds:
