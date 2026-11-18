@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>1xBet 4-Method Odds Fetcher & Download Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Sticky Topbar with Live Fetching State -->
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <div class="brand">
+        <div class="brand-badge">1xBet Data Suite</div>
+        <div>
+          <h1>ระบบดึงข้อมูลราคาต่อรอง 1xBet & ศูนย์ดาวน์โหลด</h1>
+          <p class="subtitle">ตั้งค่าพารามิเตอร์ &rarr; กดบันทึก &rarr; เลือกวิธีดึงข้อมูล &rarr; ดาวน์โหลดไฟล์</p>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <div id="liveStatePill" class="live-state-pill idle" role="status" aria-live="polite">
+          <span id="liveStateSpinner" class="spinner hidden" aria-hidden="true"></span>
+          <span id="liveStateDot" class="pulse-dot idle"></span>
+          <div class="live-state-text">
+            <strong id="liveStateTitle">🟢 พร้อมใช้งาน (ไม่ได้กำลังดึงข้อมูล)</strong>
+            <small id="liveStateDetail">ข้อมูลล่าสุด: 0 คู่ · อัปเดต: -</small>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="topProgressTrack" class="progress-track hidden">
+      <div class="progress-bar-indeterminate"></div>
+    </div>
+  </header>
+
+  <main class="container main-content">
+    <!-- Read-Only Dropdown: Comparison Table -->
+    <details class="panel comparison-dropdown" id="comparisonDropdown">
+      <summary class="dropdown-summary">
+        <div class="dropdown-summary-left">
+          <span class="dropdown-icon">📊</span>
+          <div>
+            <strong>ตารางเปรียบเทียบทั้ง 4 วิธีการดึงข้อมูล (กดเพื่อเปิด/ปิดดูรายละเอียด)</strong>
+            <small>ข้อมูลเปรียบเทียบสำหรับอ่านประกอบการตัดสินใจ (ค่าใช้จ่าย, ความเร็ว, ความยาก, ความเหมาะสม)</small>
+          </div>
+        </div>
+        <span class="dropdown-chevron">▼ เปิด/ปิดตารางเปรียบเทียบ</span>
+      </summary>
+      <div class="dropdown-body">
+        <div class="table-responsive">
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th>วิธีการดึงข้อมูล</th>
+                <th>ค่าใช้จ่าย</th>
+                <th>ความเร็ว (Latency)</th>
+                <th>ความยากในการพัฒนาและดูแล</th>
+                <th>เหมาะกับงานประเภทไหน</th>
+              </tr>
+            </thead>
+            <tbody id="comparisonTableBody">
+              <!-- Rendered read-only by app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
+    <!-- STEP 1 (TOP): Parameter Configuration + Save Settings -->
+    <section class="panel step-panel step-1-panel">
+      <div class="panel-header">
+        <div class="step-title-wrap">
+          <span class="step-badge">ขั้นที่ 1</span>
+          <div>
+            <h2>⚙️ ตั้งค่าพารามิเตอร์การดึงข้อมูล (ตั้งค่าแล้วกดบันทึกก่อนเรียกใช้)</h2>
+            <p>เลือกโหมดกีฬา จำนวนคู่ต่อวิธี และค่าการเชื่อมต่อ จากนั้นกดปุ่ม "บันทึกการตั้งค่า"</p>
+          </div>
+        </div>
+        <div id="settingsDirtyBadge" class="badge badge-live">
+          ✅ บันทึกการตั้งค่าแล้ว
+        </div>
+      </div>
+
+      <form id="configForm" class="config-form" onsubmit="event.preventDefault(); saveSettings();">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="cfgMode">1. โหมดการแข่งขัน (Feed Mode)</label>
+            <select id="cfgMode" onchange="markSettingsDirty()">
+              <option value="prematch" selected>บอลล่วงหน้า / ก่อนแข่ง (Pre-match / LineFeed)</option>
+              <option value="live">กำลังแข่งสด (Live / LiveFeed)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="cfgSport">2. โหมดกีฬา (Sport / Esports — รวมทุกกีฬา &amp; แยก 20 ประเภท)</label>
+            <select id="cfgSport" onchange="markSettingsDirty()">
+              <option value="0">🌐 กีฬาทั้งหมด (All Sports - รวมทุกประเภทกีฬา)</option>
+              <option value="1" selected>⚽ ฟุตบอล (Football / Soccer)</option>
+              <option value="3">🏀 บาสเกตบอล (Basketball)</option>
+              <option value="4">🎾 เทนนิส (Tennis)</option>
+              <option value="6">🏐 วอลเลย์บอล (Volleyball)</option>
+              <option value="2">🏒 ฮอกกี้น้ำแข็ง (Ice Hockey)</option>
+              <option value="16">🏸 แบดมินตัน (Badminton)</option>
+              <option value="10">🏓 เทเบิลเทนนิส / ปิงปอง (Table Tennis)</option>
+              <option value="9">🥊 มวยสากล / มวยไทย (Boxing / Muay Thai)</option>
+              <option value="56">🥋 MMA / UFC</option>
+              <option value="40">🎮 อีสปอร์ต (Esports)</option>
+              <option value="5">⚾ เบสบอล (Baseball)</option>
+              <option value="13">🏈 อเมริกันฟุตบอล (NFL)</option>
+              <option value="19">🎱 สนุกเกอร์ (Snooker)</option>
+              <option value="29">⚽ ฟุตซอล (Futsal)</option>
+              <option value="8">🤾 แฮนด์บอล (Handball)</option>
+              <option value="7">🏉 รักบี้ (Rugby)</option>
+              <option value="66">🏏 คริกเก็ต (Cricket)</option>
+              <option value="21">🎯 ปาเป้า (Darts)</option>
+              <option value="18">⛳ กอล์ฟ (Golf)</option>
+              <option value="24">🏎️ มอเตอร์สปอร์ต / F1</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="cfgCount">3. จำนวนคู่ต่อวิธี (Matches per Method)</label>
+            <input type="number" id="cfgCount" min="1" max="50" value="6" oninput="markSettingsDirty()" />
+          </div>
+        </div>
+
+        <div class="form-row date-range-row">
+          <div class="form-group">
+            <label for="cfgDateFrom">4. ตั้งแต่วันที่ (Start Date)</label>
+            <input type="date" id="cfgDateFrom" onchange="markSettingsDirty()" />
+          </div>
+          <div class="form-group">
+            <label for="cfgDateTo">5. ถึงวันที่ (End Date)</label>
+            <input type="date" id="cfgDateTo" onchange="markSettingsDirty()" />
+          </div>
+          <div class="form-group">
+            <label>เลือกช่วงเวลาด่วน (Quick Presets)</label>
+            <div class="date-presets-row">
+              <button type="button" class="btn btn-outline btn-sm preset-btn" onclick="applyDatePreset(0)">วันนี้</button>
+              <button type="button" class="btn btn-outline btn-sm preset-btn" onclick="applyDatePreset(3)">3 วัน</button>
+              <button type="button" class="btn btn-outline btn-sm preset-btn" onclick="applyDatePreset(7)">7 วัน</button>
+              <button type="button" class="btn btn-outline btn-sm preset-btn" onclick="applyDatePreset(14)">14 วัน</button>
+            </div>
+          </div>
+        </div>
+
+        <details class="advanced-settings">
+          <summary>🔧 ตั้งค่าขั้นสูงเพิ่มเติม (1xBet Mirror Domain, Proxy, OddsPapi Key, Headless Browser)</summary>
+          <div class="advanced-body">
+            <div class="form-row">
+              <div class="form-group">
+                <label for="cfgDomain">1xBet Domain / Mirror URL (สำหรับวิธีที่ 1 &amp; 2)</label>
+                <input type="text" id="cfgDomain" value="https://1xbet.com" placeholder="https://1xbet.com หรือโดเมนทางเข้าสำรอง" oninput="markSettingsDirty()" />
+              </div>
+              <div class="form-group">
+                <label for="cfgProxy">HTTP / SOCKS Proxy (ถ้ามี สำหรับเลี่ยงบล็อกไอพี)</label>
+                <input type="text" id="cfgProxy" value="" placeholder="เช่น http://user:pass@proxy-host:8080" oninput="markSettingsDirty()" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="cfgOddsPapiKey">OddsPapi API Key (สำหรับวิธีที่ 4 — เว้นว่างเพื่อใช้ข้อมูลจำลอง 5 ชั้น)</label>
+                <input type="password" id="cfgOddsPapiKey" value="" placeholder="ใส่ ODDSPAPI_API_KEY (Free Tier 250 req/เดือน)" oninput="markSettingsDirty()" />
+              </div>
+              <div class="form-group checkbox-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="cfgLiveBrowser" onchange="markSettingsDirty()" />
+                  <span>เปิดรัน Headless Browser จริงในวิธีที่ 2 (Selenium/Playwright)</span>
+                </label>
+                <small class="hint">ปิดไว้เพื่อความรวดเร็วและป้องกันการค้างเมื่อโดเมนถูกบล็อก</small>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <div class="step1-footer">
+          <div id="savedSummaryInline" class="saved-summary-inline">
+            กำลังโหลดค่าที่บันทึกไว้...
+          </div>
+          <button type="submit" id="btnSaveSettings" class="btn btn-accent btn-lg">
+            💾 บันทึกการตั้งค่า (Save Settings)
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- STEP 2: Choose Method & Trigger Fetch using Saved Settings -->
+    <section class="panel step-panel">
+      <div class="panel-header">
+        <div class="step-title-wrap">
+          <span class="step-badge">ขั้นที่ 2</span>
+          <div>
+            <h2>🚀 เลือกวิธีการดึงข้อมูล (ทำงานตามค่าที่บันทึกไว้ในขั้นที่ 1)</h2>
+            <p id="activeSavedBanner">ระบบจะใช้ค่าที่บันทึกไว้ล่าสุดเมื่อคุณกดเรียกดึงข้อมูลด้านล่าง</p>
+          </div>
+        </div>
+        <button id="btnRunAll" class="btn btn-primary btn-lg" onclick="triggerFetch('all')">
+          ⚡ ดึงข้อมูลทั้งหมดทั้ง 4 วิธี
+        </button>
+      </div>
+
+      <!-- Fetching Activity Banner -->
+      <div id="fetchActivityBox" class="activity-box idle">
+        <div class="activity-left">
+          <span id="activitySpinner" class="spinner hidden" aria-hidden="true"></span>
+          <span id="activityText">สถานะ: พร้อมรับคำสั่ง — กด "ดึงข้อมูลทั้งหมดทั้ง 4 วิธี" หรือเลือกกดทีละวิธีด้านล่าง</span>
+        </div>
+        <span id="activityTimer" class="activity-timer"></span>
+      </div>
+
+      <div class="methods-grid" id="methodCardsGrid">
+        <!-- Rendered by app.js -->
+      </div>
+    </section>
+
+    <!-- STEP 3: Download Center -->
+    <section class="panel step-panel download-panel" id="downloadCenter">
+      <div class="panel-header">
+        <div class="step-title-wrap">
+          <span class="step-badge">ขั้นที่ 3</span>
+          <div>
+            <h2>📥 เลือกดาวน์โหลดข้อมูล &amp; สคริปต์ Python (Download Center)</h2>
+            <p>เลือกเฉพาะวิธีที่ต้องการหรือรวมทั้งหมด แล้วกดดาวน์โหลดเป็นไฟล์ใช้งานได้ทันที</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="download-layout">
+        <div class="download-left">
+          <div class="form-group">
+            <label for="dlMethodSelect">เลือกชุดข้อมูลที่ต้องการดาวน์โหลด:</label>
+            <select id="dlMethodSelect" onchange="updateDownloadSummary()">
+              <option value="all" selected>📦 ทั้งหมดรวมกัน (All 4 Methods Combined)</option>
+              <option value="1">วิธีที่ 1: ยิง Internal Feed ตรง (LineFeed / LiveFeed)</option>
+              <option value="2">วิธีที่ 2: Playwright / Selenium Network Interception</option>
+              <option value="3">วิธีที่ 3: Scrape จากเว็บกลาง (OddsPortal / Flashscore)</option>
+              <option value="4">วิธีที่ 4: OddsPapi REST API (Free Tier v4)</option>
+            </select>
+          </div>
+
+          <div class="download-summary-box" id="dlSummaryBox">
+            พร้อมดาวน์โหลดข้อมูล
+          </div>
+
+          <div class="script-dl-row">
+            <button type="button" class="btn btn-accent btn-block" onclick="downloadFile('script', 'all')">
+              📦 ดาวน์โหลดชุดโค้ด Python ทั้ง 4 วิธี + ข้อมูลล่าสุด (.zip Bundle)
+            </button>
+            <div class="script-mini-btns">
+              <button type="button" class="btn btn-outline btn-sm" onclick="downloadFile('script', '1')">🐍 วิธีที่ 1 (.py)</button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="downloadFile('script', '2')">🐍 วิธีที่ 2 (.py)</button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="downloadFile('script', '3')">🐍 วิธีที่ 3 (.py)</button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="downloadFile('script', '4')">🐍 วิธีที่ 4 (.py)</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="download-buttons-grid">
+          <button type="button" class="dl-card-btn" onclick="downloadFile('csv')">
+            <span class="dl-icon">📄</span>
+            <div class="dl-meta">
+              <strong>ดาวน์โหลด CSV (.csv)</strong>
+              <small>UTF-8 BOM เปิดภาษาไทยใน Excel ได้ทันที</small>
+            </div>
+          </button>
+
+          <button type="button" class="dl-card-btn" onclick="downloadFile('xls')">
+            <span class="dl-icon">📊</span>
+            <div class="dl-meta">
+              <strong>ดาวน์โหลดตาราง Excel (.xls)</strong>
+              <small>ตารางจัดรูปแบบพร้อมค่า Implied Prob % และค่าน้ำ</small>
+            </div>
+          </button>
+
+          <button type="button" class="dl-card-btn" onclick="downloadFile('json')">
+            <span class="dl-icon">🧩</span>
+            <div class="dl-meta">
+              <strong>ดาวน์โหลด Normalized JSON (.json)</strong>
+              <small>โครงสร้างมาตรฐานเดียวกันทั้ง 4 วิธี พร้อมเขียนบอทต่อ</small>
+            </div>
+          </button>
+
+          <button type="button" class="dl-card-btn" onclick="downloadFile('raw_json')">
+            <span class="dl-icon">🔍</span>
+            <div class="dl-meta">
+              <strong>ดาวน์โหลด Raw JSON (.json)</strong>
+              <small>ข้อมูลดิบแท้ (Value/E หรือโครงสร้าง 5 ชั้น OddsPapi)</small>
+            </div>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 4: Normalized Odds Table & Raw JSON Inspector -->
+    <section class="panel step-panel">
+      <div class="panel-header explorer-header">
+        <div class="tabs-bar">
+          <button id="tabBtnTable" class="tab-btn active" onclick="switchExplorerTab('table')">
+            🏆 ตารางราคาต่อรองที่ดึงได้ (<span id="tableCountBadge">0</span> คู่)
+          </button>
+          <button id="tabBtnRaw" class="tab-btn" onclick="switchExplorerTab('raw')">
+            🧬 ตรวจสอบโครงสร้าง Raw JSON
+          </button>
+        </div>
+
+        <div class="filter-bar" id="tableFilterBar">
+          <select id="filterMethod" onchange="renderOddsTable()">
+            <option value="all">ทุกวิธีการดึงข้อมูล (All 4 Methods)</option>
+            <option value="1">เฉพาะวิธีที่ 1: Internal Feed (VZip)</option>
+            <option value="2">เฉพาะวิธีที่ 2: Browser Interception</option>
+            <option value="3">เฉพาะวิธีที่ 3: Odds Aggregators</option>
+            <option value="4">เฉพาะวิธีที่ 4: OddsPapi REST v4</option>
+          </select>
+
+          <select id="filterActive" onchange="renderOddsTable()">
+            <option value="all">ทุกสถานะตลาด (Active &amp; Suspended)</option>
+            <option value="active">เฉพาะตลาดเปิดรับแทง (Active == true)</option>
+            <option value="suspended">เฉพาะตลาดระงับ/ล็อกราคา (Suspended)</option>
+          </select>
+
+          <input
+            type="search"
+            id="filterSearch"
+            placeholder="ค้นหาชื่อทีม กีฬา หรือ ลีก..."
+            oninput="renderOddsTable()"
+          />
+        </div>
+      </div>
+
+      <div id="explorerTabTable" class="explorer-tab-content">
+        <div class="table-responsive">
+          <table class="odds-table">
+            <thead>
+              <tr>
+                <th>วิธีที่</th>
+                <th>กีฬา / ลีก / เวลา (UTC)</th>
+                <th>คู่แข่งขัน &amp; สกอร์</th>
+                <th class="num-col">เจ้าบ้าน (1)</th>
+                <th class="num-col">เสมอ (X)</th>
+                <th class="num-col">ทีมเยือน (2)</th>
+                <th>Implied %</th>
+                <th class="num-col">Margin</th>
+                <th>แฮนดิแคป (HDP)</th>
+                <th>สูง/ต่ำ (O/U)</th>
+                <th>สถานะตลาด</th>
+              </tr>
+            </thead>
+            <tbody id="oddsTableBody">
+              <!-- Rendered by app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="explorerTabRaw" class="explorer-tab-content hidden">
+        <div class="raw-toolbar">
+          <div class="raw-toolbar-left">
+            <label for="rawMethodSelect">ดูโครงสร้าง JSON ดิบของ:</label>
+            <select id="rawMethodSelect" onchange="renderRawJson()">
+              <option value="1">วิธีที่ 1: 1xBet Get1x2_VZip (คีย์ย่อ Value -&gt; I, L, O1, O2, E)</option>
+              <option value="2">วิธีที่ 2: Playwright/Selenium Intercepted Network Payload</option>
+              <option value="3">วิธีที่ 3: Aggregator Scraper Payload (พร้อมราคาเปิด-ปิด)</option>
+              <option value="4">วิธีที่ 4: OddsPapi v4 (โครงสร้างซ้อน 5 ชั้น bookmakers -&gt; 1xbet -&gt; markets)</option>
+              <option value="all">รวมทั้งหมด (All 4 Methods Raw Object)</option>
+            </select>
+          </div>
+          <div class="raw-toolbar-right">
+            <button type="button" class="btn btn-outline btn-sm" onclick="copyRawJson()">
+              📋 คัดลอก JSON
+            </button>
+            <button type="button" class="btn btn-primary btn-sm" onclick="downloadRawFromInspector()">
+              ⬇️ ดาวน์โหลด Raw JSON นี้
+            </button>
+          </div>
+        </div>
+        <pre id="rawJsonViewer" class="raw-json-pre">กำลังโหลดข้อมูล...</pre>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
